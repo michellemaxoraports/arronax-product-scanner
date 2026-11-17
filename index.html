@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1769aa">
+  <title>Arronax Product Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; background:#f4f6f8; color:#17212b; font-family:Arial,sans-serif; }
+    main { max-width:560px; margin:0 auto; padding:18px 14px 40px; }
+    h1 { font-size:24px; margin:8px 0 5px; }
+    .sub,.hint { color:#64748b; font-size:13px; line-height:1.5; }
+    .panel { background:white; border-radius:16px; padding:15px; margin:13px 0; box-shadow:0 2px 12px #15253612; }
+    button { border:0; border-radius:10px; padding:13px 15px; font-size:16px; font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.55; }
+    .primary { background:#1769aa; color:white; width:100%; }
+    .secondary { background:#e8eef5; color:#183247; }
+    .row { display:flex; gap:8px; }
+    input { width:100%; min-width:0; border:1px solid #cbd5e1; border-radius:10px; padding:12px; font-size:16px; margin:5px 0 10px; }
+    #reader { width:100%; overflow:hidden; border-radius:12px; }
+    #status { color:#64748b; font-size:14px; line-height:1.45; margin-top:10px; min-height:20px; overflow-wrap:anywhere; }
+    #result { display:none; }
+    #productImage { width:100%; max-height:220px; object-fit:contain; border-radius:12px; background:#f8fafc; display:none; margin-bottom:12px; }
+    .name { font-size:21px; font-weight:700; margin:0 0 8px; }
+    .price { font-size:20px; font-weight:700; margin:0 0 12px; }
+    .field { margin:10px 0; }
+    .label { display:block; color:#64748b; font-size:11px; text-transform:uppercase; letter-spacing:.04em; margin-bottom:3px; }
+    .value { white-space:pre-wrap; overflow-wrap:anywhere; }
+    .error { color:#a33 !important; }
+    details summary { cursor:pointer; font-weight:600; }
+    .hidden { display:none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Arronax Product Lookup</h1>
+  <p class="sub">Scan a product barcode to view its details.</p>
+
+  <section class="panel">
+    <label for="apiUrl"><strong>Apps Script Web App URL</strong></label>
+    <input id="apiUrl" type="url" placeholder="Paste your deployed URL ending in /exec" autocomplete="url">
+    <p class="hint">Enter your Google Apps Script published Web App URL once on this device.</p>
+    <button class="primary" id="startBtn" onclick="startScanner()">Start scanner</button>
+    <button class="secondary hidden" id="stopBtn" onclick="stopScanner()" style="width:100%;margin-top:8px">Stop scanner</button>
+    <div id="reader" style="margin-top:12px"></div>
+    <div id="status" role="status" aria-live="polite">Enter your /exec URL, then tap Start scanner.</div>
+  </section>
+
+  <section class="panel">
+    <strong>Manual lookup</strong>
+    <div class="row" style="margin-top:8px">
+      <input id="manualCode" type="text" placeholder="Enter product code" autocomplete="off" style="margin:0">
+      <button class="secondary" onclick="manualLookup()">Search</button>
+    </div>
+    <p class="hint">Letters and numbers are supported. Custom alphanumeric labels should use Code 128.</p>
+  </section>
+
+  <section class="panel" id="result">
+    <img id="productImage" alt="Product image">
+    <div id="productName" class="name"></div>
+    <div id="productPrice" class="price"></div>
+    <div id="productFields"></div>
+    <button class="secondary" style="width:100%;margin-top:14px" onclick="clearResult()">Scan another product</button>
+  </section>
+
+  <section class="panel">
+    <details>
+      <summary>Connection / camera help</summary>
+      <p class="hint">Use this page in Safari or Chrome over HTTPS. Allow camera access when prompted. If camera access was previously blocked, open the browser's site settings and allow Camera, then reload this page. Close other camera apps before scanning.</p>
+      <p class="hint">If lookup fails, check that the Apps Script deployment is the latest version and that its access setting permits this scanner to call the read-only lookup endpoint.</p>
+    </details>
+  </section>
+</main>
+
+<script>
+  let scanner = null;
+  let scanLocked = false;
+
+  const $ = id => document.getElementById(id);
+
+  function setStatus(message, isError) {
+    $('status').textContent = message;
+    $('status').classList.toggle('error', !!isError);
+  }
+
+  function getApiUrl() {
+    const url = $('apiUrl').value.trim();
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec\/?$/.test(url)) {
+      throw new Error('Please enter a valid Apps Script Web App URL ending in /exec.');
+    }
+    return url.replace(/\/$/, '');
+  }
+
+  function jsonpLookup(code) {
+    return new Promise((resolve, reject) => {
+      let apiUrl;
+      try { apiUrl = getApiUrl(); } catch (e) { reject(e); return; }
+
+      const callbackName = 'arronaxLookup_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+      const script = document.createElement('script');
+      let finished = false;
+
+      const cleanup = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        delete window[callbackName];
+        script.remove();
+      };
+
+      window[callbackName] = data => {
+        cleanup();
+        resolve(data);
+      };
+
+      script.onerror = () => {
+        cleanup();
+        reject(new Error('Could not reach the Apps Script lookup endpoint. Check the /exec URL and deployment access.'));
+      };
+
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Lookup timed out. Please check your internet connection and Apps Script deployment.'));
+      }, 15000);
+
+      script.src = apiUrl + '?api=1&code=' + encodeURIComponent(code) +
+        '&callback=' + encodeURIComponent(callbackName) + '&_=' + Date.now();
+      document.body.appendChild(script);
+    });
+  }
+
+  async function startScanner() {
+    if (typeof Html5Qrcode === 'undefined') {
+      setStatus('Scanner library did not load. Check your internet connection.', true);
+      return;
+    }
+    try { getApiUrl(); } catch (e) { setStatus(e.message, true); return; }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('This browser does not provide camera access here. Open this page directly in Safari or Chrome over HTTPS.', true);
+      return;
+    }
+
+    try {
+      scanLocked = false;
+      $('startBtn').classList.add('hidden');
+      $('stopBtn').classList.remove('hidden');
+
+      scanner = new Html5Qrcode('reader', {
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.CODE_128,
+          Html5QrcodeSupportedFormats.CODE_39,
+          Html5QrcodeSupportedFormats.QR_CODE,
+          Html5QrcodeSupportedFormats.EAN_13,
+          Html5QrcodeSupportedFormats.EAN_8,
+          Html5QrcodeSupportedFormats.UPC_A,
+          Html5QrcodeSupportedFormats.UPC_E
+        ],
+        verbose: false
+      });
+
+      setStatus('Requesting camera permission…');
+      await scanner.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: (vw, vh) => {
+            const width = Math.min(320, Math.floor(vw * 0.88));
+            const height = Math.min(180, Math.floor(vh * 0.35));
+            return { width, height };
+          }, aspectRatio: 1.5 },
+        onScanSuccess,
+        () => {}
+      );
+      setStatus('Camera is on. Point it at a barcode.');
+    } catch (err) {
+      const detail = err && err.message ? err.message : String(err);
+      setStatus('Could not start camera: ' + detail + '. Check this page’s camera permission and close other apps using the camera.', true);
+      $('startBtn').classList.remove('hidden');
+      $('stopBtn').classList.add('hidden');
+      if (scanner) {
+        try { await scanner.clear(); } catch (_) {}
+      }
+      scanner = null;
+    }
+  }
+
+  async function onScanSuccess(decodedText) {
+    if (scanLocked) return;
+    scanLocked = true;
+    $('manualCode').value = decodedText;
+    setStatus('Barcode detected: ' + decodedText + '. Looking up product…');
+    await stopScanner();
+    await lookup(decodedText);
+  }
+
+  async function stopScanner() {
+    if (scanner) {
+      try {
+        if (scanner.isScanning) await scanner.stop();
+        await scanner.clear();
+      } catch (_) {}
+      scanner = null;
+    }
+    $('startBtn').classList.remove('hidden');
+    $('stopBtn').classList.add('hidden');
+  }
+
+  async function manualLookup() {
+    const code = $('manualCode').value.trim();
+    if (!code) { setStatus('Enter a product code first.', true); return; }
+    await lookup(code);
+  }
+
+  async function lookup(code) {
+    setStatus('Searching…');
+    try {
+      const product = await jsonpLookup(code);
+      showProduct(product);
+    } catch (err) {
+      setStatus(err.message || 'Something went wrong.', true);
+    }
+  }
+
+  function addField(container, label, value) {
+    if (value === undefined || value === null || value === '') return;
+    const wrap = document.createElement('div');
+    wrap.className = 'field';
+    const l = document.createElement('span');
+    l.className = 'label';
+    l.textContent = label;
+    const v = document.createElement('div');
+    v.className = 'value';
+    v.textContent = value;
+    wrap.append(l, v);
+    container.appendChild(wrap);
+  }
+
+  function showProduct(product) {
+    $('result').style.display = 'block';
+    const image = $('productImage');
+    image.style.display = 'none';
+    image.removeAttribute('src');
+
+    if (!product || !product.found) {
+      $('productName').textContent = 'Product not found';
+      $('productPrice').textContent = '';
+      $('productFields').innerHTML = '';
+      addField($('productFields'), 'Message', product && product.message ? product.message : 'No matching product.');
+      setStatus('No matching product.', true);
+      return;
+    }
+
+    $('productName').textContent = product.productName || 'Unnamed product';
+    $('productPrice').textContent = product.price ? '$' + product.price : '';
+    $('productFields').innerHTML = '';
+    addField($('productFields'), 'Product Code', product.productCode);
+    addField($('productFields'), 'Barcode', product.barcode);
+    addField($('productFields'), 'Category', product.category);
+    addField($('productFields'), 'Description', product.description);
+    addField($('productFields'), 'Notes', product.notes);
+
+    if (product.imageUrl) {
+      image.onload = () => image.style.display = 'block';
+      image.onerror = () => image.style.display = 'none';
+      image.src = product.imageUrl;
+    }
+    setStatus('Product found.');
+  }
+
+  async function clearResult() {
+    $('result').style.display = 'none';
+    $('manualCode').value = '';
+    scanLocked = false;
+    setStatus('Ready to scan another product.');
+    await startScanner();
+  }
+
+  $('apiUrl').value = localStorage.getItem('arronaxAppsScriptUrl') || '';
+  $('apiUrl').addEventListener('change', () => {
+    localStorage.setItem('arronaxAppsScriptUrl', $('apiUrl').value.trim());
+  });
+</script>
+</body>
+</html>
